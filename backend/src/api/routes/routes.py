@@ -1,23 +1,20 @@
 import logging
-import io
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
 
-from src.core.database import get_db
+from src.core.database import AsyncSessionLocal, get_db
 from src.models.models import Document, ExtractionResult, Batch
 from src.schemas.schemas import (
     ClassifyRequest, ClassifyResponse,
     ExtractRequest, BatchExtractRequest,
-    DocumentResponse, DocumentDetailResponse,
     FieldUpdateRequest, StatusUpdateRequest,
-    ExportRequest, BatchResponse, BatchStatusResponse,
-    StatsResponse, HealthResponse,
+    ExportRequest, HealthResponse,
 )
 from src.services.groq_vision import GroqVisionService
 from src.services.document_processor import DocumentProcessor
@@ -117,7 +114,6 @@ async def classify_document(
 @extract_router.post("/extract")
 async def extract_document(
     req: ExtractRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Document).where(Document.id == req.document_id)
@@ -137,7 +133,10 @@ async def extract_document(
         )
     except Exception as e:
         logger.exception("Extraction failed for document %s", req.document_id)
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(
+            status_code=500,
+            detail="Document extraction failed. Please try again later.",
+        ) from e
 
     return {"message": "Extraction complete", **extraction_result}
 
@@ -146,18 +145,26 @@ async def extract_document(
 async def extract_batch(
     req: BatchExtractRequest,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
 ):
-    processor = DocumentProcessor()
-
     async def _process_all():
-        for doc_id in req.document_ids:
-            try:
-                await processor.process_document(
-                    doc_id, db, document_type_override=req.document_type
-                )
-            except Exception as e:
-                logger.error(f"Batch: failed {doc_id}: {e}")
+        async with AsyncSessionLocal() as session:
+            processor = DocumentProcessor()
+
+            for doc_id in req.document_ids:
+                try:
+                    await processor.process_document(
+                        doc_id,
+                        session,
+                        document_type_override=req.document_type,
+                        force_reprocess=False,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Batch extraction failed for document %s",
+                        doc_id,
+                    )
+
+            await session.commit()
 
     background_tasks.add_task(_process_all)
     return {
@@ -188,6 +195,15 @@ async def list_documents(
         stmt = stmt.where(Document.status == status)
     if batch_id:
         stmt = stmt.where(Document.batch_id == batch_id)
+    if search:
+        query = f"%{search}%"
+        stmt = stmt.where(
+            or_(
+                Document.original_filename.ilike(query),
+                Document.filename.ilike(query),
+                Document.document_type.ilike(query),
+            )
+        )
     stmt = stmt.order_by(Document.created_at.desc()).offset(skip).limit(limit)
 
     result = await db.execute(stmt)
@@ -281,16 +297,34 @@ async def get_preview(doc_id: str, db: AsyncSession = Depends(get_db)):
     if not doc:
         raise HTTPException(404, "Document not found")
 
-    img_path = doc.preview_path or doc.preprocessed_path or doc.file_path
-    if not Path(img_path).exists():
+    img_path = doc.preview_path or doc.preprocessed_path
+    if not img_path and doc.pages:
+        img_path = doc.pages[0].image_path
+    if not img_path:
+        file_path = Path(doc.file_path)
+        if file_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}:
+            img_path = doc.file_path
+
+    if not img_path or not Path(img_path).exists():
         raise HTTPException(404, "Preview image not found")
 
     with open(img_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
 
+    media_types = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".bmp": "image/bmp",
+        ".tiff": "image/tiff",
+        ".webp": "image/webp",
+    }
+    media_type = media_types.get(Path(img_path).suffix.lower(), "image/jpeg")
+
     return {
         "document_id": doc_id,
         "image_base64": b64,
+        "media_type": media_type,
         "bounding_boxes": (doc.extraction_result.bounding_boxes if doc.extraction_result else []),
     }
 
@@ -367,13 +401,29 @@ async def export_documents(
     req: ExportRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    requested_ids = list(dict.fromkeys(req.document_ids))
+    if not requested_ids:
+        raise HTTPException(400, "No document IDs provided")
+
     # Load documents
     stmt = select(Document).options(
         selectinload(Document.extraction_result),
         selectinload(Document.pages),
-    ).where(Document.id.in_(req.document_ids))
+    ).where(Document.id.in_(requested_ids))
     result = await db.execute(stmt)
     docs = result.scalars().all()
+
+    found_ids = {doc.id for doc in docs}
+    missing_ids = [doc_id for doc_id in requested_ids if doc_id not in found_ids]
+    if missing_ids:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "Some requested documents were not found",
+                "missing_ids": missing_ids,
+            },
+        )
+
     docs_data = [_doc_to_dict(d) for d in docs]
 
     svc = ExportService()
@@ -421,7 +471,6 @@ async def export_batch(
         raise HTTPException(404, "Batch or documents not found")
 
     docs_data = [_doc_to_dict(d) for d in docs]
-    svc = ExportService()
     req = ExportRequest(document_ids=[d["id"] for d in docs_data], format=format)
     return await export_documents(req, db)
 

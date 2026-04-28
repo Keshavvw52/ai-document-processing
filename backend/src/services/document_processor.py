@@ -6,17 +6,15 @@ Coordinates the full pipeline:
 """
 
 import logging
-import os
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from src.core.config import settings
-from src.models.models import Document, DocumentPage, ExtractionResult, Batch
+from src.models.models import Document, DocumentPage, ExtractionResult
 from src.services.image_preprocessor import ImagePreprocessor
 from src.services.ocr_engine import OCREngine
 from src.services.groq_vision import GroqVisionService
@@ -123,6 +121,9 @@ class DocumentProcessor:
                 doc_type = classify_result.get("document_type", "form")
                 doc.document_type = doc_type
                 doc.classification_confidence = classify_result.get("confidence", 0.5)
+                await db.commit()
+            else:
+                doc.document_type = doc_type
                 await db.commit()
 
             # ── Step 4: LLM Extraction ────────────────────────────────────
@@ -232,6 +233,7 @@ class DocumentProcessor:
         pages_info = self.pdf.process_pdf(doc.file_path, str(pages_dir))
 
         doc.page_count = len(pages_info)
+        await db.execute(delete(DocumentPage).where(DocumentPage.document_id == doc.id))
         await db.commit()
 
         pages_data = []

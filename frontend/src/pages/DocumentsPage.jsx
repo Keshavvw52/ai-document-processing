@@ -14,9 +14,16 @@ import {
   formatDateTime, DOC_TYPES, STATUSES
 } from '../utils/helpers'
 
+const getApiErrorMessage = (err) =>
+  err?.response?.data?.detail?.message ||
+  err?.response?.data?.detail ||
+  err?.message ||
+  'Request failed'
+
 function DocumentCard({ doc, onDelete, onProcess, onView, selected, onSelect }) {
   const statusInfo = getStatusBadge(doc.status)
   const typeInfo = getDocType(doc.document_type)
+  const filename = doc.original_filename || doc.filename || 'Untitled document'
 
   return (
     <div
@@ -43,8 +50,8 @@ function DocumentCard({ doc, onDelete, onProcess, onView, selected, onSelect }) 
       </div>
 
       {/* Filename */}
-      <p className="text-sm font-medium text-slate-200 truncate mb-1" title={doc.original_filename}>
-        {doc.original_filename}
+      <p className="text-sm font-medium text-slate-200 truncate mb-1" title={filename}>
+        {filename}
       </p>
       <p className={`text-xs font-medium mb-3 ${typeInfo.color}`}>
         {typeInfo.label}
@@ -114,6 +121,14 @@ export default function DocumentsPage() {
 
   useEffect(() => { fetchDocs() }, [fetchDocs])
 
+  useEffect(() => {
+    const currentIds = new Set(docs.map((doc) => doc.id))
+    setSelected((prev) => {
+      const next = new Set([...prev].filter((id) => currentIds.has(id)))
+      return next.size === prev.size ? prev : next
+    })
+  }, [docs])
+
   const toggleSelect = (id) => {
     setSelected((prev) => {
       const s = new Set(prev)
@@ -131,12 +146,15 @@ export default function DocumentsPage() {
   }
 
   const handleDelete = async (doc) => {
-    if (!confirm(`Delete "${doc.original_filename}"?`)) return
+    const filename = doc.original_filename || doc.filename || 'Untitled document'
+    if (!confirm(`Delete "${filename}"?`)) return
     try {
       await deleteDocument(doc.id)
       toast.success('Document deleted')
       fetchDocs()
-    } catch { }
+    } catch (err) {
+      toast.error(getApiErrorMessage(err))
+    }
   }
 
   const handleProcess = async (doc) => {
@@ -144,19 +162,27 @@ export default function DocumentsPage() {
       await extractDocument(doc.id)
       toast.success('Extraction complete')
       fetchDocs()
-    } catch { }
+    } catch (err) {
+      toast.error(getApiErrorMessage(err))
+    }
   }
 
   const handleBulkExport = async (format) => {
-    if (!selected.size) { toast.error('Select documents first'); return }
-    await exportDocuments([...selected], format)
+    const currentIds = new Set(docs.map((doc) => doc.id))
+    const exportIds = [...selected].filter((id) => currentIds.has(id))
+    if (!exportIds.length) { toast.error('Select documents first'); return }
+    await exportDocuments(exportIds, format)
   }
 
   const handleBulkDelete = async () => {
     if (!selected.size) return
     if (!confirm(`Delete ${selected.size} documents?`)) return
     for (const id of selected) {
-      try { await deleteDocument(id) } catch { }
+      try {
+        await deleteDocument(id)
+      } catch (err) {
+        toast.error(getApiErrorMessage(err))
+      }
     }
     setSelected(new Set())
     fetchDocs()
@@ -167,9 +193,11 @@ export default function DocumentsPage() {
   const filteredDocs = docs.filter((d) => {
     if (!filters.search) return true
     const q = filters.search.toLowerCase()
+    const filename = `${d.original_filename || d.filename || ''}`.toLowerCase()
+    const documentType = `${d.document_type || ''}`.toLowerCase()
     return (
-      d.original_filename.toLowerCase().includes(q) ||
-      (d.document_type || '').toLowerCase().includes(q)
+      filename.includes(q) ||
+      documentType.includes(q)
     )
   })
 
@@ -319,6 +347,7 @@ export default function DocumentsPage() {
               {filteredDocs.map((doc) => {
                 const s = getStatusBadge(doc.status)
                 const t = getDocType(doc.document_type)
+                const filename = doc.original_filename || doc.filename || 'Untitled document'
                 return (
                   <tr key={doc.id} className="hover:bg-slate-800/30 transition-colors cursor-pointer"
                     onClick={() => navigate(`/documents/${doc.id}`)}>
@@ -330,8 +359,8 @@ export default function DocumentsPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <span>{t.icon}</span>
-                        <span className="text-slate-200 truncate max-w-[200px]" title={doc.original_filename}>
-                          {doc.original_filename}
+                        <span className="text-slate-200 truncate max-w-[200px]" title={filename}>
+                          {filename}
                         </span>
                       </div>
                     </td>

@@ -162,10 +162,24 @@ export default function UploadPage() {
       toast.error('No queued files to upload')
       return
     }
+    let successCount = 0
+    let failedCount = 0
     for (const item of queued) {
-      await uploadFile(item)
+      const docId = await uploadFile(item)
+      if (docId) {
+        successCount += 1
+      } else {
+        failedCount += 1
+      }
     }
-    toast.success('All files uploaded')
+
+    if (failedCount === 0) {
+      toast.success(`Uploaded ${successCount} file${successCount === 1 ? '' : 's'}`)
+    } else if (successCount > 0) {
+      toast.error(`Uploaded ${successCount}, failed ${failedCount}`)
+    } else {
+      toast.error('All uploads failed')
+    }
   }
 
   const handleProcessAll = async () => {

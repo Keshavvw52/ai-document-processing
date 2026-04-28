@@ -1,6 +1,5 @@
 import logging
 import os
-import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -19,7 +18,25 @@ router = APIRouter(prefix="/api/upload", tags=["upload"])
 ALLOWED = settings.allowed_extensions_set
 
 
-def _validate_file(file: UploadFile) -> None:
+def _detect_file_type(header: bytes) -> tuple[Optional[str], Optional[str]]:
+    """Detect supported file types from magic bytes."""
+    if header.startswith(b"%PDF-"):
+        return "pdf", "application/pdf"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png", "image/png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return "jpg", "image/jpeg"
+    if header.startswith(b"BM"):
+        return "bmp", "image/bmp"
+    if header.startswith((b"II*\x00", b"MM\x00*")):
+        return "tiff", "image/tiff"
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "webp", "image/webp"
+    return None, None
+
+
+async def _validate_file(file: UploadFile) -> str:
+    """Validate extension and content signature; returns detected MIME type."""
     ext = Path(file.filename or "").suffix.lstrip(".").lower()
     if ext not in ALLOWED:
         raise HTTPException(
@@ -27,8 +44,38 @@ def _validate_file(file: UploadFile) -> None:
             detail=f"File type .{ext} not allowed. Allowed: {', '.join(ALLOWED)}",
         )
 
+    header = await file.read(512)
+    await file.seek(0)
 
-async def _save_upload(file: UploadFile, dest_dir: Path) -> tuple[str, str, int, str]:
+    if not header:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    detected_ext, detected_mime = _detect_file_type(header)
+    if not detected_ext:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Unsupported file content. Upload a valid PDF or image file.",
+        )
+
+    normalized_ext = "jpg" if ext == "jpeg" else ext
+    normalized_detected = "jpg" if detected_ext == "jpeg" else detected_ext
+    if normalized_ext != normalized_detected:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=(
+                f"File extension .{ext} does not match detected content "
+                f"({detected_mime})."
+            ),
+        )
+
+    return detected_mime or "application/octet-stream"
+
+
+async def _save_upload(
+    file: UploadFile,
+    dest_dir: Path,
+    mime_type: str,
+) -> tuple[str, str, int, str]:
     """Save uploaded file; returns (saved_path, filename, size, mime_type)."""
     ext = Path(file.filename or "unnamed").suffix.lower()
     unique_name = f"{uuid.uuid4()}{ext}"
@@ -48,8 +95,7 @@ async def _save_upload(file: UploadFile, dest_dir: Path) -> tuple[str, str, int,
                 )
             f.write(chunk)
 
-    mime = file.content_type or "application/octet-stream"
-    return str(dest_path), unique_name, size, mime
+    return str(dest_path), unique_name, size, mime_type
 
 
 @router.post("", response_model=UploadResponse)
@@ -59,8 +105,8 @@ async def upload_single(
     db: AsyncSession = Depends(get_db),
 ):
     """Upload a single document for processing."""
-    _validate_file(file)
-    file_path, filename, size, mime = await _save_upload(file, settings.upload_path)
+    mime = await _validate_file(file)
+    file_path, filename, size, mime = await _save_upload(file, settings.upload_path, mime)
 
     doc = Document(
         filename=filename,
@@ -109,8 +155,12 @@ async def upload_batch(
     document_ids = []
     for file in files:
         try:
-            _validate_file(file)
-            file_path, filename, size, mime = await _save_upload(file, settings.upload_path)
+            mime = await _validate_file(file)
+            file_path, filename, size, mime = await _save_upload(
+                file,
+                settings.upload_path,
+                mime,
+            )
             doc = Document(
                 filename=filename,
                 original_filename=file.filename or filename,

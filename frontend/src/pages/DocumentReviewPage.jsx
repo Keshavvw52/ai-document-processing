@@ -174,17 +174,12 @@ export default function DocumentReviewPage() {
     try {
       const res = await getDocument(id)
       setDoc(res.data)
-      // Load preview image
-      if (['extracted', 'approved', 'under_review'].includes(res.data.status)) {
-        try {
-          const previewRes = await getPreview(id)
-          setPreviewImage(`data:image/jpeg;base64,${previewRes.data.image_base64}`)
-        } catch {
-          // Fallback to raw upload URL
-          setPreviewImage(`/uploads/${res.data.filename}`)
-        }
-      } else {
-        setPreviewImage(`/uploads/${res.data.filename}`)
+      try {
+        const previewRes = await getPreview(id)
+        const mediaType = previewRes.data.media_type || 'image/jpeg'
+        setPreviewImage(`data:${mediaType};base64,${previewRes.data.image_base64}`)
+      } catch {
+        setPreviewImage(null)
       }
     } catch {
       toast.error('Failed to load document')
@@ -224,11 +219,19 @@ export default function DocumentReviewPage() {
     }
   }
 
-  const handleRequestReview = async () => {
-    await updateStatus(id, 'under_review')
-    setDoc((prev) => ({ ...prev, status: 'under_review' }))
-    toast.success('Marked for review')
+const handleRequestReview = async () => {
+  try {
+    await updateStatus(id, "under_review")
+    toast.success("Document sent for review")
+  } catch (err) {
+    toast.error(
+      err?.response?.data?.detail ||
+      "Failed to request review. Please try again."
+    )
   }
+}
+
+
 
   const handleReprocess = async () => {
     setProcessing(true)

@@ -6,7 +6,6 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 
 from src.core.config import settings
@@ -150,13 +149,6 @@ async def global_exception_handler(request: Request, exc: Exception):
             "message": "Internal server error",
         },
     )
-
-
-app.mount(
-    "/uploads",
-    StaticFiles(directory=str(settings.upload_path)),
-    name="uploads",
-)
 
 
 app.include_router(upload_router)
